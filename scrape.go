@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -658,7 +659,10 @@ func httpGetContext(ctx context.Context, client *http.Client, url string) (*http
 		return nil, err
 	}
 	req = req.WithContext(ctx)
-	req.Header.Set("User-Agent", "Outlived/1.0")
+	// Wikimedia's API requires a descriptive User-Agent that identifies the
+	// application and a means of contact. Generic agents may be blocked.
+	// EDIT the contact below to your own URL or e-mail.
+	req.Header.Set("User-Agent", "Outlived/1.0 (https://outlived.net; contact: tqastro) outlived-scraper")
 	return client.Do(req)
 }
 
@@ -669,6 +673,16 @@ func getWikiHTML(ctx context.Context, client *http.Client, name string) (*http.R
 	if err != nil {
 		return nil, "", err
 	}
+
+	// Critical: if the server did not return 200, the body is an error page,
+	// not the article. Parsing it would yield misleading "no infobox" errors.
+	// Surface the real status (and a snippet) instead.
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		return nil, "", fmt.Errorf("fetching %s: HTTP %d: %s", prefix+name, resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+
 	loc := resp.Header.Get("Content-Location")
 	if newName := strings.TrimPrefix(loc, prefix); newName != loc {
 		name = newName

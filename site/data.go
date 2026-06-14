@@ -54,7 +54,8 @@ type (
 func (s *Server) handleData(
 	ctx context.Context,
 	req struct {
-		TZName string `json:"tzname"`
+		TZName       string `json:"tzname"`
+		ByPopularity bool   `json:"byPopularity"` // Added to catch the toggle from frontend
 	},
 ) (*dataResp, error) {
 	var (
@@ -74,7 +75,8 @@ func (s *Server) handleData(
 	}
 
 	if sess != nil {
-		_, d, err := s.getUserData(ctx, sess, today)
+		// Pass ByPopularity down the chain
+		_, d, err := s.getUserData(ctx, sess, today, req.ByPopularity)
 		if err != nil {
 			return nil, errors.Wrap(err, "getting user data")
 		}
@@ -84,17 +86,17 @@ func (s *Server) handleData(
 	return resp, nil
 }
 
-func (s *Server) getUserData(ctx context.Context, sess *aesite.Session, today outlived.Date) (*outlived.User, *userData, error) {
+func (s *Server) getUserData(ctx context.Context, sess *aesite.Session, today outlived.Date, byPopularity bool) (*outlived.User, *userData, error) {
 	var u outlived.User
 	err := sess.GetUser(ctx, s.dsClient, &u)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "getting user from session")
 	}
 
-	return s.getUserData2(ctx, sess, &u, today)
+	return s.getUserData2(ctx, sess, &u, today, byPopularity)
 }
 
-func (s *Server) getUserData2(ctx context.Context, sess *aesite.Session, u *outlived.User, today outlived.Date) (*outlived.User, *userData, error) {
+func (s *Server) getUserData2(ctx context.Context, sess *aesite.Session, u *outlived.User, today outlived.Date, byPopularity bool) (*outlived.User, *userData, error) {
 	csrf, err := sess.CSRFToken()
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "generating CSRF token")
@@ -113,7 +115,8 @@ func (s *Server) getUserData2(ctx context.Context, sess *aesite.Session, u *outl
 		Active:         u.Active,
 	}
 
-	figures, err := outlived.FiguresAliveForAtMost(ctx, s.dsClient, alive-1, 24)
+	// Pass byPopularity to the datastore query
+	figures, err := outlived.FiguresAliveForAtMost(ctx, s.dsClient, alive-1, 24, byPopularity)
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "getting figures that died %d days ago", alive-1)
 	}

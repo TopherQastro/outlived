@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 
 	cloudtasks "cloud.google.com/go/cloudtasks/apiv2"
 	"cloud.google.com/go/datastore"
@@ -39,6 +40,12 @@ func main() {
 		}
 	}
 
+	// We are "local" (not talking to real Google Cloud) if we're in test mode
+	// or if we've been pointed at a datastore emulator via the standard env var.
+	// In that case we must NOT try to create a cloudtasks client, because there
+	// is no emulator for cloudtasks and it would demand real credentials.
+	usingEmulator := *test || os.Getenv("DATASTORE_EMULATOR_HOST") != ""
+
 	var options []option.ClientOption
 	if *creds != "" {
 		options = append(options, option.WithCredentialsFile(*creds))
@@ -50,7 +57,7 @@ func main() {
 	}
 
 	var ctClient *cloudtasks.Client
-	if !*test {
+	if !usingEmulator {
 		ctClient, err = cloudtasks.NewClient(ctx, options...)
 		if err != nil {
 			log.Fatalf("Creating cloudtasks client: %s", err)

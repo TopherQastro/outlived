@@ -14,6 +14,8 @@ import (
 	"github.com/bobg/mid"
 	"github.com/pkg/errors"
 	"google.golang.org/appengine"
+
+	"outlived"
 )
 
 func NewServer(ctx context.Context, contentDir, projectID, locationID string, dsClient *datastore.Client, ctClient *cloudtasks.Client) (*Server, error) {
@@ -46,9 +48,79 @@ func NewServer(ctx context.Context, contentDir, projectID, locationID string, ds
 	} else {
 		s.tasks = newLocalTasks(ctx, addr)
 		s.sender = new(testSender)
+
+		// Local/dev convenience: make sure a known, verified user exists so
+		// you can log in without the e-mail verification flow. Controlled by
+		// env vars, with sensible defaults. Safe to leave in for local runs;
+		// it only fires when NOT on App Engine.
+		if err := seedDevUser(ctx, dsClient); err != nil {
+			return nil, errors.Wrap(err, "seeding dev user")
+		}
 	}
 
 	return s, nil
+}
+
+// seedDevUser creates a verified, active user in the local datastore if one
+// does not already exist. Credentials and birthdate come from env vars:
+//
+//	OUTLIVED_DEV_EMAIL    (default "me@test.com")
+//	OUTLIVED_DEV_PASSWORD (default "test1234")
+//	OUTLIVED_DEV_BORN     (default "1987-04-23", format YYYY-MM-DD)
+//
+// This runs only in local mode (see caller) and is a no-op once the user
+// exists, so it's safe to run on every startup.
+func seedDevUser(ctx context.Context, dsClient *datastore.Client) error {
+	email := os.Getenv("OUTLIVED_DEV_EMAIL")
+	if email == "" {
+		email = "me@test.com"
+	}
+	password := os.Getenv("OUTLIVED_DEV_PASSWORD")
+	if password == "" {
+		password = "test1234"
+	}
+	bornStr := os.Getenv("OUTLIVED_DEV_BORN")
+	if bornStr == "" {
+		bornStr = "1987-04-23"
+	}
+
+	// If the user already exists, do nothing.
+	var existing outlived.User
+	err := aesite.LookupUser(ctx, dsClient, email, &existing)
+	if err == nil {
+		log.Printf("dev user %s already present", email)
+		return nil
+	}
+	// Any error other than "not found" is a real problem.
+	if !errors.Is(err, datastore.ErrNoSuchEntity) {
+		return errors.Wrap(err, "looking up dev user")
+	}
+
+	born, err := outlived.ParseDate(bornStr)
+	if err != nil {
+		return errors.Wrap(err, "parsing OUTLIVED_DEV_BORN")
+	}
+
+	u := &outlived.User{
+		Born:     born,
+		Active:   true,
+		TZName:   "America/Los_Angeles",
+		TZSector: outlived.TZSector(-8 * 3600), // Pacific, offset in seconds
+	}
+
+	// aesite.NewUser hashes the password and stores the user (initially unverified).
+	if err := aesite.NewUser(ctx, dsClient, email, password, u); err != nil {
+		return errors.Wrap(err, "creating dev user")
+	}
+
+	// Mark the embedded aesite.User verified, then write the user back.
+	u.User.Verified = true
+	if _, err := dsClient.Put(ctx, u.Key(), u); err != nil {
+		return errors.Wrap(err, "marking dev user verified")
+	}
+
+	log.Printf("seeded verified dev user %s (born %s) - password: %s", email, born, password)
+	return nil
 }
 
 type Server struct {

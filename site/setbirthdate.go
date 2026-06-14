@@ -44,6 +44,6 @@ func (s *Server) handleSetBirthdate(
 	if err != nil {
 		return nil, errors.Wrap(err, "storing updated birthdate")
 	}
-	_, d, err := s.getUserData2(ctx, sess, &u, today)
+	_, d, err := s.getUserData2(ctx, sess, &u, today, false)
 	return d, errors.Wrap(err, "getting updated user data")
 }

@@ -35,6 +35,11 @@ func (a admincmd) Subcmds() subcmd.Map {
 		"list-users", a.listUsers, nil,
 		"get", a.get, nil,
 		"set", a.set, nil,
+		"adduser", a.addUser, subcmd.Params(
+			"email", subcmd.String, "", "user email",
+			"password", subcmd.String, "", "user password",
+			"born", subcmd.String, "", "birthdate, like 1987-04-23",
+		),
 		"scrape", a.scrape, subcmd.Params(
 			"month", subcmd.String, "", "3-letter month",
 			"day", subcmd.Int, 0, "day of month",
@@ -96,6 +101,42 @@ func (a admincmd) set(ctx context.Context, args []string) error {
 	}
 
 	return aesite.SetSetting(ctx, a.c.dsClient, args[0], []byte(args[1]))
+}
+
+// addUser creates a fully-verified, active user directly in the datastore,
+// bypassing the e-mail verification flow entirely. Intended for local/test use.
+func (a admincmd) addUser(ctx context.Context, email, password, bornStr string, _ []string) error {
+	if email == "" || password == "" || bornStr == "" {
+		return errors.New("usage: outlived admin adduser -email EMAIL -password PASS -born YYYY-MM-DD")
+	}
+
+	born, err := outlived.ParseDate(bornStr)
+	if err != nil {
+		return errors.Wrap(err, "parsing birthdate")
+	}
+
+	u := &outlived.User{
+		Born:     born,
+		Active:   true,
+		TZName:   "America/Los_Angeles",
+		TZSector: outlived.TZSector(-8 * 3600), // Pacific, offset in seconds
+	}
+
+	// aesite.NewUser hashes the password and stores the user.
+	err = aesite.NewUser(ctx, a.c.dsClient, email, password, u)
+	if err != nil {
+		return errors.Wrap(err, "creating user")
+	}
+
+	// Skip e-mail verification: mark verified and write the user back.
+	u.Verified = true
+	_, err = a.c.dsClient.Put(ctx, u.Key(), u)
+	if err != nil {
+		return errors.Wrap(err, "marking user verified")
+	}
+
+	log.Printf("created verified user %s (born %s)", email, born)
+	return nil
 }
 
 var daysInMonth = []int{

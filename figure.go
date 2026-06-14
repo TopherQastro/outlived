@@ -60,11 +60,26 @@ func FiguresAliveFor(ctx context.Context, client *datastore.Client, days, limit 
 	return figures, errors.Wrap(err, "querying figures")
 }
 
-func FiguresAliveForAtMost(ctx context.Context, client *datastore.Client, days, limit int) ([]*Figure, error) {
+func FiguresAliveForAtMost(ctx context.Context, client *datastore.Client, days, limit int, byPopularity bool) ([]*Figure, error) {
+	// Datastore constraint: when a query has an inequality filter (here
+	// "DaysAlive <="), the FIRST Order() must be on that same property.
+	// So we always order by DaysAlive first at the datastore level, and do
+	// any popularity sorting in Go afterward, where there are no such limits.
 	q := datastore.NewQuery("Figure").Filter("DaysAlive <=", days).Order("-DaysAlive").Order("-Pageviews")
+
+	// How many candidates to pull from the datastore before sorting in Go.
+	//   - Default (closest-in-age) view: we only need the top `limit` by DaysAlive.
+	//   - Fame view: "most famous people you've outlived" could be anywhere below
+	//     your age line, so we pull a larger pool and pick the top `limit` by
+	//     pageviews in memory.
+	fetch := limit
+	if byPopularity {
+		fetch = 2000 // generous cap; the full pool of outlived figures
+	}
+
 	it := client.Run(ctx, q)
 	var figures []*Figure
-	for len(figures) < limit {
+	for len(figures) < fetch {
 		var fig Figure
 		_, err := it.Next(&fig)
 		if err == iterator.Done {
@@ -75,9 +90,29 @@ func FiguresAliveForAtMost(ctx context.Context, client *datastore.Client, days, 
 		}
 		figures = append(figures, &fig)
 	}
-	sort.Slice(figures, func(i, j int) bool {
-		return figures[i].Pageviews > figures[j].Pageviews
-	})
+
+	if byPopularity {
+		// Most famous first; break ties by who lived longer.
+		sort.Slice(figures, func(i, j int) bool {
+			if figures[i].Pageviews == figures[j].Pageviews {
+				return figures[i].DaysAlive > figures[j].DaysAlive
+			}
+			return figures[i].Pageviews > figures[j].Pageviews
+		})
+		if len(figures) > limit {
+			figures = figures[:limit]
+		}
+	} else {
+		// Closest-in-age first (longest-lived among those you've outlived);
+		// break ties by fame.
+		sort.Slice(figures, func(i, j int) bool {
+			if figures[i].DaysAlive == figures[j].DaysAlive {
+				return figures[i].Pageviews > figures[j].Pageviews
+			}
+			return figures[i].DaysAlive > figures[j].DaysAlive
+		})
+	}
+
 	return figures, nil
 }
 
