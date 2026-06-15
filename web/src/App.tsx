@@ -9,8 +9,12 @@ import {
     CardHeader,
     Checkbox,
     CircularProgress,
+    FormControl,
     FormControlLabel,
+    InputLabel,
     Link,
+    MenuItem,
+    Select,
     Snackbar,
     ThemeProvider,
     Typography,
@@ -67,6 +71,19 @@ const useStyles = makeStyles((theme: Theme) => ({
     },
 }))
 
+// Age-range filter options. value is in days; 0 means no filter (all time).
+const rangeOptions = [
+    { label: 'Within 1 month', value: 30 },
+    { label: 'Within 6 months', value: 182 },
+    { label: 'Within 1 year', value: 365 },
+    { label: 'Within 5 years', value: 1826 },
+    { label: 'Within 10 years', value: 3652 },
+    { label: 'All time', value: 0 },
+]
+
+// How many results to show.
+const resultOptions = [24, 50, 100, 200]
+
 export const App = () => {
     const [alert, setAlert] = useState('')
     const [alertSeverity, setAlertSeverity] = useState<'error' | 'info'>('error')
@@ -75,15 +92,21 @@ export const App = () => {
     const [today, setToday] = useState('')
     const [user, setUser] = useState<UserData | null>(null)
 
-    // Added fame toggle state
+    // Controls
     const [byPopularity, setByPopularity] = useState(false)
+    const [rangeDays, setRangeDays] = useState(365)
+    const [resultLimit, setResultLimit] = useState(24)
 
     const classes = useStyles()
 
     const getData = async () => {
         try {
-            // Include byPopularity in the POST request
-            const resp = await post('/s/data', { tzname: tzname(), byPopularity })
+            const resp = await post('/s/data', {
+                tzname: tzname(),
+                byPopularity,
+                rangeDays,
+                resultLimit,
+            })
             const data = (await resp.json()) as Data
             if (!data.figures) {
                 setAlert('Error: received no figures from server')
@@ -113,7 +136,6 @@ export const App = () => {
 
             const tomw = new Date(y, m - 1, d)
 
-            // Reload happens at 1 second + up to 5 minutes into the new day (to avoid a stampede).
             window.setTimeout(
                 getData,
                 tomw.getTime() - now.getTime() + 1000 + Math.random() * 300000
@@ -123,12 +145,11 @@ export const App = () => {
         }
     }
 
-    // Calling getData inside useEffect this way eliminates duplicate calls to the server.
     useEffect(() => {
         if (!loaded && !alert) {
             getData()
         }
-    }, [loaded, alert, byPopularity])
+    }, [loaded, alert, byPopularity, rangeDays, resultLimit])
 
     const setAlertAPI = (msg: string, severity?: 'error' | 'info') => {
         setAlertSeverity(severity || 'error')
@@ -154,20 +175,59 @@ export const App = () => {
                                             {user.daysAlive.toLocaleString()} days ago
                                             <br />({user.yearsDaysAlive}).
                                         </Typography>
-                                        <FormControlLabel
-                                            control={
-                                                <Checkbox
-                                                    checked={byPopularity}
+                                        <Box style={{ marginTop: '10px' }}>
+                                            <FormControlLabel
+                                                control={
+                                                    <Checkbox
+                                                        checked={byPopularity}
+                                                        onChange={(e) => {
+                                                            setByPopularity(e.target.checked)
+                                                            setLoaded(false)
+                                                        }}
+                                                        color="primary"
+                                                    />
+                                                }
+                                                label="Sort matches by fame"
+                                            />
+                                        </Box>
+                                        <Box display="flex" justifyContent="center" style={{ marginTop: '10px', gap: '16px' }}>
+                                            <FormControl variant="outlined" size="small" style={{ minWidth: 180 }}>
+                                                <InputLabel id="range-label">Age range</InputLabel>
+                                                <Select
+                                                    labelId="range-label"
+                                                    value={rangeDays}
                                                     onChange={(e) => {
-                                                        setByPopularity(e.target.checked)
-                                                        setLoaded(false) // Triggers a refetch with new sort
+                                                        setRangeDays(e.target.value as number)
+                                                        setLoaded(false)
                                                     }}
-                                                    color="primary"
-                                                />
-                                            }
-                                            label="Sort matches by fame"
-                                            style={{ marginTop: '10px' }}
-                                        />
+                                                    label="Age range"
+                                                >
+                                                    {rangeOptions.map((opt) => (
+                                                        <MenuItem key={opt.value} value={opt.value}>
+                                                            {opt.label}
+                                                        </MenuItem>
+                                                    ))}
+                                                </Select>
+                                            </FormControl>
+                                            <FormControl variant="outlined" size="small" style={{ minWidth: 120 }}>
+                                                <InputLabel id="limit-label">Results</InputLabel>
+                                                <Select
+                                                    labelId="limit-label"
+                                                    value={resultLimit}
+                                                    onChange={(e) => {
+                                                        setResultLimit(e.target.value as number)
+                                                        setLoaded(false)
+                                                    }}
+                                                    label="Results"
+                                                >
+                                                    {resultOptions.map((n) => (
+                                                        <MenuItem key={n} value={n}>
+                                                            {n}
+                                                        </MenuItem>
+                                                    ))}
+                                                </Select>
+                                            </FormControl>
+                                        </Box>
                                     </>
                                 ) : (
                                     undefined

@@ -55,7 +55,9 @@ func (s *Server) handleData(
 	ctx context.Context,
 	req struct {
 		TZName       string `json:"tzname"`
-		ByPopularity bool   `json:"byPopularity"` // Added to catch the toggle from frontend
+		ByPopularity bool   `json:"byPopularity"`
+		RangeDays    int    `json:"rangeDays"`
+		ResultLimit  int    `json:"resultLimit"`
 	},
 ) (*dataResp, error) {
 	var (
@@ -65,7 +67,13 @@ func (s *Server) handleData(
 		sess  = getSess(ctx)
 	)
 
-	figures, err := outlived.FiguresDiedOn(ctx, s.dsClient, today.M, today.D, 24)
+	// Clamp the result limit to a sane range.
+	resultLimit := req.ResultLimit
+	if resultLimit <= 0 || resultLimit > 500 {
+		resultLimit = 24
+	}
+
+	figures, err := outlived.FiguresDiedOn(ctx, s.dsClient, today.M, today.D, resultLimit)
 	if err != nil {
 		return nil, errors.Wrapf(err, "getting figures that died on %d %s", today.D, today.M)
 	}
@@ -75,8 +83,7 @@ func (s *Server) handleData(
 	}
 
 	if sess != nil {
-		// Pass ByPopularity down the chain
-		_, d, err := s.getUserData(ctx, sess, today, req.ByPopularity)
+		_, d, err := s.getUserData(ctx, sess, today, req.ByPopularity, req.RangeDays, resultLimit)
 		if err != nil {
 			return nil, errors.Wrap(err, "getting user data")
 		}
@@ -86,17 +93,17 @@ func (s *Server) handleData(
 	return resp, nil
 }
 
-func (s *Server) getUserData(ctx context.Context, sess *aesite.Session, today outlived.Date, byPopularity bool) (*outlived.User, *userData, error) {
+func (s *Server) getUserData(ctx context.Context, sess *aesite.Session, today outlived.Date, byPopularity bool, rangeDays int, resultLimit int) (*outlived.User, *userData, error) {
 	var u outlived.User
 	err := sess.GetUser(ctx, s.dsClient, &u)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "getting user from session")
 	}
 
-	return s.getUserData2(ctx, sess, &u, today, byPopularity)
+	return s.getUserData2(ctx, sess, &u, today, byPopularity, rangeDays, resultLimit)
 }
 
-func (s *Server) getUserData2(ctx context.Context, sess *aesite.Session, u *outlived.User, today outlived.Date, byPopularity bool) (*outlived.User, *userData, error) {
+func (s *Server) getUserData2(ctx context.Context, sess *aesite.Session, u *outlived.User, today outlived.Date, byPopularity bool, rangeDays int, resultLimit int) (*outlived.User, *userData, error) {
 	csrf, err := sess.CSRFToken()
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "generating CSRF token")
@@ -115,8 +122,17 @@ func (s *Server) getUserData2(ctx context.Context, sess *aesite.Session, u *outl
 		Active:         u.Active,
 	}
 
-	// Pass byPopularity to the datastore query
-	figures, err := outlived.FiguresAliveForAtMost(ctx, s.dsClient, alive-1, 24, byPopularity)
+	// Compute the minimum lifespan (in days) for the age-range filter.
+	// rangeDays == 0 means "all time" (no lower bound).
+	minDays := 0
+	if rangeDays > 0 {
+		minDays = alive - rangeDays
+		if minDays < 0 {
+			minDays = 0
+		}
+	}
+
+	figures, err := outlived.FiguresAliveForAtMost(ctx, s.dsClient, alive-1, minDays, resultLimit, byPopularity)
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "getting figures that died %d days ago", alive-1)
 	}

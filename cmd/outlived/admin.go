@@ -42,7 +42,8 @@ func (a admincmd) Subcmds() subcmd.Map {
 			"born", subcmd.String, "", "birthdate, like 1987-04-23",
 		),
 		"scrape", a.scrape, subcmd.Params(
-			"month", subcmd.String, "", "3-letter month",
+			"month", subcmd.String, "", "3-letter month (scrape only this month)",
+			"from", subcmd.String, "", "3-letter month to resume from (through December)",
 			"day", subcmd.Int, 0, "day of month",
 			"limit", subcmd.Duration, time.Second, "rate limit",
 		),
@@ -156,7 +157,7 @@ var daysInMonth = []int{
 	31,
 }
 
-func (a admincmd) scrape(ctx context.Context, monthStr string, onlyDay int, limit time.Duration, _ []string) error {
+func (a admincmd) scrape(ctx context.Context, monthStr string, fromStr string, onlyDay int, limit time.Duration, _ []string) error {
 	var (
 		startMonth = time.January
 		endMonth   = time.December
@@ -165,13 +166,24 @@ func (a admincmd) scrape(ctx context.Context, monthStr string, onlyDay int, limi
 		return errors.New("must specify -month with -day")
 	}
 
+	// -from sets the start month (through December). Useful for resuming
+	// an interrupted full-year scrape.
+	if fromStr != "" {
+		d, err := time.Parse("Jan", fromStr)
+		if err != nil {
+			return err
+		}
+		startMonth = d.Month()
+	}
+
 	// Cookie jar so the BotPassword login session persists across requests.
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return errors.Wrap(err, "creating cookie jar")
 	}
 	client := &http.Client{
-		Jar: jar,
+		Jar:     jar,
+		Timeout: 30 * time.Second,
 		Transport: &rlroundtripper{
 			limiter: rate.NewLimiter(rate.Every(limit), 1),
 			rt:      http.DefaultTransport,
@@ -188,11 +200,9 @@ func (a admincmd) scrape(ctx context.Context, monthStr string, onlyDay int, limi
 	if monthStr != "" {
 		d, err := time.Parse("Jan", monthStr)
 		if err != nil {
-			log.Printf("err != nil 191", err)
 			return err
 		}
 		if onlyDay != 0 {
-			log.Printf("onlyDay != 0 195", onlyDay)
 			return scrapeMonthDay(ctx, client, a.c.dsClient, d.Month(), onlyDay)
 		}
 		startMonth = d.Month()
@@ -200,15 +210,12 @@ func (a admincmd) scrape(ctx context.Context, monthStr string, onlyDay int, limi
 	}
 	for m := startMonth; m <= endMonth; m++ {
 		for d := 1; d <= daysInMonth[m]; d++ {
-			log.Printf("203", ctx, client, a.c.dsClient, m, d)
 			err := scrapeMonthDay(ctx, client, a.c.dsClient, m, d)
 			if err != nil {
-				log.Printf("err != nil 206", err)
 				return err
 			}
 		}
 	}
-	log.Printf("returning nil")
 	return nil
 }
 
@@ -234,7 +241,6 @@ func scrapeMonthDay(ctx context.Context, client *http.Client, dsClient *datastor
 					Pageviews: pageviews,
 					Updated:   time.Now(),
 				}
-				log.Printf("returning info...")
 				return outlived.ReplaceFigures(ctx, dsClient, []*outlived.Figure{fig})
 			})
 		if err != nil {

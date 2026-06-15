@@ -60,12 +60,17 @@ func FiguresAliveFor(ctx context.Context, client *datastore.Client, days, limit 
 	return figures, errors.Wrap(err, "querying figures")
 }
 
-func FiguresAliveForAtMost(ctx context.Context, client *datastore.Client, days, limit int, byPopularity bool) ([]*Figure, error) {
+func FiguresAliveForAtMost(ctx context.Context, client *datastore.Client, days, minDays, limit int, byPopularity bool) ([]*Figure, error) {
 	// Datastore constraint: when a query has an inequality filter (here
 	// "DaysAlive <="), the FIRST Order() must be on that same property.
+	// Multiple inequality filters on the SAME property are allowed.
 	// So we always order by DaysAlive first at the datastore level, and do
 	// any popularity sorting in Go afterward, where there are no such limits.
-	q := datastore.NewQuery("Figure").Filter("DaysAlive <=", days).Order("-DaysAlive").Order("-Pageviews")
+	q := datastore.NewQuery("Figure").Filter("DaysAlive <=", days)
+	if minDays > 0 {
+		q = q.Filter("DaysAlive >=", minDays)
+	}
+	q = q.Order("-DaysAlive").Order("-Pageviews")
 
 	// How many candidates to pull from the datastore before sorting in Go.
 	//   - Default (closest-in-age) view: we only need the top `limit` by DaysAlive.

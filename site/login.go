@@ -93,7 +93,7 @@ func (s *Server) handleLogin(
 	if err != nil {
 		return nil, errors.Wrapf(err, "creating session for user %s", req.Email)
 	}
-	_, d, err := s.getUserData2(ctx, sess, &u, today, false)
+	_, d, err := s.getUserData2(ctx, sess, &u, today, false, 0, 24)
 	if err != nil {
 		return nil, errors.Wrap(err, "getting user data")
 	}
