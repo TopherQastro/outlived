@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"time"
 
 	"cloud.google.com/go/datastore"
@@ -163,18 +164,35 @@ func (a admincmd) scrape(ctx context.Context, monthStr string, onlyDay int, limi
 	if monthStr == "" && onlyDay != 0 {
 		return errors.New("must specify -month with -day")
 	}
+
+	// Cookie jar so the BotPassword login session persists across requests.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return errors.Wrap(err, "creating cookie jar")
+	}
 	client := &http.Client{
+		Jar: jar,
 		Transport: &rlroundtripper{
 			limiter: rate.NewLimiter(rate.Every(limit), 1),
 			rt:      http.DefaultTransport,
 		},
 	}
+
+	// Authenticate with a BotPassword (read from the environment) so we get the
+	// higher authenticated rate limit. If no credentials are set, we proceed
+	// anonymously (subject to the much lower anonymous limit).
+	if err := outlived.WikiLogin(ctx, client); err != nil {
+		return errors.Wrap(err, "logging in to Wikimedia")
+	}
+
 	if monthStr != "" {
 		d, err := time.Parse("Jan", monthStr)
 		if err != nil {
+			log.Printf("err != nil 191", err)
 			return err
 		}
 		if onlyDay != 0 {
+			log.Printf("onlyDay != 0 195", onlyDay)
 			return scrapeMonthDay(ctx, client, a.c.dsClient, d.Month(), onlyDay)
 		}
 		startMonth = d.Month()
@@ -182,12 +200,15 @@ func (a admincmd) scrape(ctx context.Context, monthStr string, onlyDay int, limi
 	}
 	for m := startMonth; m <= endMonth; m++ {
 		for d := 1; d <= daysInMonth[m]; d++ {
+			log.Printf("203", ctx, client, a.c.dsClient, m, d)
 			err := scrapeMonthDay(ctx, client, a.c.dsClient, m, d)
 			if err != nil {
+				log.Printf("err != nil 206", err)
 				return err
 			}
 		}
 	}
+	log.Printf("returning nil")
 	return nil
 }
 
@@ -213,6 +234,7 @@ func scrapeMonthDay(ctx context.Context, client *http.Client, dsClient *datastor
 					Pageviews: pageviews,
 					Updated:   time.Now(),
 				}
+				log.Printf("returning info...")
 				return outlived.ReplaceFigures(ctx, dsClient, []*outlived.Figure{fig})
 			})
 		if err != nil {

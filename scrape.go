@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	neturl "net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -567,14 +569,40 @@ func foreachDeathsUL(node *html.Node, f func(*html.Node) error) error {
 		return errors.New("no Deaths section found")
 	}
 
+	// In classic-parser HTML (action=parse), the <h2> is wrapped inside a
+	// <div class="mw-heading mw-heading2">. The <ul> elements are siblings
+	// of that wrapper div, not of the h2 itself. Walk siblings of the
+	// wrapper if present, otherwise walk siblings of the heading directly
+	// (Parsoid/REST HTML).
+	start := heading
+	if heading.Parent != nil && heading.Parent.DataAtom == atom.Div && htree.ElClassContains(heading.Parent, "mw-heading") {
+		start = heading.Parent
+	}
+
 	var any bool
-	for sib := heading.NextSibling; sib != nil; sib = sib.NextSibling {
+	for sib := start.NextSibling; sib != nil; sib = sib.NextSibling {
 		if sib.Type != html.ElementNode {
 			continue
 		}
+		// Stop at the next top-level heading. In Parsoid HTML this is a bare
+		// <h2>; in classic-parser HTML it is a <div class="mw-heading mw-heading2">
+		// wrapping the <h2>.
 		if sib.DataAtom == atom.H2 {
 			break
 		}
+		if sib.DataAtom == atom.Div && htree.ElClassContains(sib, "mw-heading2") {
+			break
+		}
+		// In classic-parser HTML, <ul> elements are direct siblings.
+		if sib.DataAtom == atom.Ul {
+			any = true
+			if err := f(sib); err != nil {
+				return err
+			}
+			continue
+		}
+		// Also search inside the sibling (handles Parsoid <section> wrappers
+		// and any other container elements like <div class="div-col">).
 		err := htree.FindAllEls(sib, func(n *html.Node) bool { return n.DataAtom == atom.Ul }, func(n *html.Node) error {
 			any = true
 			return f(n)
@@ -663,29 +691,156 @@ func httpGetContext(ctx context.Context, client *http.Client, url string) (*http
 	// application and a means of contact. Generic agents may be blocked.
 	// EDIT the contact below to your own URL or e-mail.
 	req.Header.Set("User-Agent", "Outlived/1.0 (https://outlived.net; contact: tqastro) outlived-scraper")
+
 	return client.Do(req)
 }
 
-func getWikiHTML(ctx context.Context, client *http.Client, name string) (*http.Response, string, error) {
-	const prefix = "https://en.wikipedia.org/api/rest_v1/page/html/"
+// apiEndpoint is the Action API endpoint used for authenticated requests.
+const apiEndpoint = "https://en.wikipedia.org/w/api.php"
 
-	resp, err := httpGetContext(ctx, client, prefix+name)
+// WikiLogin authenticates the given client against the Wikimedia Action API
+// using BotPassword credentials read from the environment:
+//
+//	WIKIMEDIA_BOT_USER  e.g. "Topherqastro@outlivedscraper"
+//	WIKIMEDIA_BOT_PASS  the generated bot password
+//
+// The client must have a cookie jar; the login session is carried by cookies.
+// If no credentials are set, WikiLogin is a no-op and scraping proceeds
+// anonymously (subject to the much lower anonymous rate limit).
+func WikiLogin(ctx context.Context, client *http.Client) error {
+	user := os.Getenv("WIKIMEDIA_BOT_USER")
+	pass := os.Getenv("WIKIMEDIA_BOT_PASS")
+	if user == "" || pass == "" {
+		log.Printf("no WIKIMEDIA_BOT_USER/WIKIMEDIA_BOT_PASS set; proceeding anonymously")
+		return nil
+	}
+
+	// Step 1: fetch a login token.
+	tokenURL := apiEndpoint + "?action=query&meta=tokens&type=login&format=json"
+	resp, err := httpGetContext(ctx, client, tokenURL)
+	if err != nil {
+		return errors.Wrap(err, "requesting login token")
+	}
+	var tokenResp struct {
+		Query struct {
+			Tokens struct {
+				LoginToken string `json:"logintoken"`
+			} `json:"tokens"`
+		} `json:"query"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&tokenResp)
+	resp.Body.Close()
+	if err != nil {
+		return errors.Wrap(err, "decoding login token")
+	}
+	loginToken := tokenResp.Query.Tokens.LoginToken
+	if loginToken == "" {
+		return errors.New("got empty login token")
+	}
+
+	// Step 2: POST the login. Credentials go in the POST body, not the URL.
+	form := neturl.Values{}
+	form.Set("action", "login")
+	form.Set("lgname", user)
+	form.Set("lgpassword", pass)
+	form.Set("lgtoken", loginToken)
+	form.Set("format", "json")
+
+	req, err := http.NewRequest("POST", apiEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return errors.Wrap(err, "building login request")
+	}
+	req = req.WithContext(ctx)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "Outlived/1.0 (https://outlived.net; contact: tqastro) outlived-scraper")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "posting login")
+	}
+	var loginResp struct {
+		Login struct {
+			Result string `json:"result"`
+			Reason string `json:"reason"`
+		} `json:"login"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&loginResp)
+	resp.Body.Close()
+	if err != nil {
+		return errors.Wrap(err, "decoding login response")
+	}
+	if loginResp.Login.Result != "Success" {
+		return fmt.Errorf("login failed: %s (%s)", loginResp.Login.Result, loginResp.Login.Reason)
+	}
+
+	log.Printf("logged in to Wikimedia as %s", user)
+	return nil
+}
+
+func getWikiHTML(ctx context.Context, client *http.Client, name string) (*http.Response, string, error) {
+	// The hrefs extracted from Wikipedia HTML include path prefixes that are
+	// not part of the page title. Classic-parser links use "/wiki/Name",
+	// Parsoid links use "./Name". The Action API expects the bare title.
+	name = strings.TrimPrefix(name, "/wiki/")
+	name = strings.TrimPrefix(name, "./")
+
+	// Use the Action API's parse module. It returns the page's rendered HTML
+	// inside a JSON envelope, which works with BotPassword authentication
+	// (unlike the REST page/html endpoint, which requires OAuth).
+	u := apiEndpoint +
+		"?action=parse" +
+		"&page=" + neturl.QueryEscape(name) +
+		"&prop=text" +
+		"&formatversion=2" +
+		"&redirects=1" +
+		"&format=json"
+
+	resp, err := httpGetContext(ctx, client, u)
 	if err != nil {
 		return nil, "", err
 	}
+	defer resp.Body.Close()
 
-	// Critical: if the server did not return 200, the body is an error page,
-	// not the article. Parsing it would yield misleading "no infobox" errors.
-	// Surface the real status (and a snippet) instead.
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		resp.Body.Close()
-		return nil, "", fmt.Errorf("fetching %s: HTTP %d: %s", prefix+name, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, "", fmt.Errorf("fetching %s: HTTP %d: %s", name, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
-	loc := resp.Header.Get("Content-Location")
-	if newName := strings.TrimPrefix(loc, prefix); newName != loc {
-		name = newName
+	var parsed struct {
+		Parse struct {
+			Title string `json:"title"`
+			Text  string `json:"text"`
+		} `json:"parse"`
+		Error struct {
+			Code string `json:"code"`
+			Info string `json:"info"`
+		} `json:"error"`
 	}
-	return resp, name, nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", errors.Wrapf(err, "reading parse response for %s", name)
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, "", errors.Wrapf(err, "decoding parse response for %s", name)
+	}
+	if parsed.Error.Code != "" {
+		return nil, "", fmt.Errorf("API error parsing %s: %s (%s)", name, parsed.Error.Code, parsed.Error.Info)
+	}
+	if parsed.Parse.Text == "" {
+		return nil, "", fmt.Errorf("empty parse text for %s", name)
+	}
+
+	// Hand the HTML to callers via a synthetic response body, so the existing
+	// html.Parse(resp.Body) call sites work unchanged.
+	updatedName := name
+	if parsed.Parse.Title != "" {
+		updatedName = strings.ReplaceAll(parsed.Parse.Title, " ", "_")
+	}
+
+	synthetic := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(parsed.Parse.Text)),
+		Header:     make(http.Header),
+	}
+	return synthetic, updatedName, nil
 }
