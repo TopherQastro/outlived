@@ -783,6 +783,7 @@ func getWikiHTML(ctx context.Context, client *http.Client, name string) (*http.R
 	// Parsoid links use "./Name". The Action API expects the bare title.
 	name = strings.TrimPrefix(name, "/wiki/")
 	name = strings.TrimPrefix(name, "./")
+	name, _ = neturl.PathUnescape(name)
 
 	// Use the Action API's parse module. It returns the page's rendered HTML
 	// inside a JSON envelope, which works with BotPassword authentication
