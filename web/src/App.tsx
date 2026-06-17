@@ -108,10 +108,14 @@ export const App = () => {
                 resultLimit,
             })
             const data = (await resp.json()) as Data
-            if (!data.figures) {
+
+            // Allow the page to render even if no one famous died today.
+            // Only treat it as a real error if we got neither died-today
+            // figures NOR user/outlived data.
+            if (!data.figures && !data.user) {
                 setAlert('Error: received no figures from server')
             } else {
-                setFigures(data.figures)
+                setFigures(data.figures || [])
                 setToday(data.today)
                 setUser(data.user)
                 setLoaded(true)
